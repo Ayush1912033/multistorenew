@@ -1,0 +1,23 @@
+{
+  "bo": {
+    "username": "vboxuser",
+    "password": "Password@123",
+    "port": 22,
+    "connect_timeout": 5.0,
+    "operation_timeout": 60.0
+  },
+  "counter": {
+    "username": "countertest",
+    "password": "Test@123",
+    "port": 22,
+    "connect_timeout": 5.0,
+    "operation_timeout": 60.0
+  },
+  "ip_generation": {
+    "counter_start": 112
+  },
+  "ui": {
+    "window_width": 1450,
+    "window_height": 900
+  }
+}
