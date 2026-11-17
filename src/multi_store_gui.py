@@ -46,7 +46,12 @@ class MultiStoreApp:
         outer = ttk.Frame(self.root, padding=12); outer.pack(fill='both', expand=True)
         ttk.Label(outer, text='POS File Distributor', font=('Segoe UI',20,'bold')).pack(anchor='w')
         ttk.Label(outer, text='Multi-store processing • No automatic retries • Retry failed stores manually').pack(anchor='w', pady=(0,10))
-        credentials = ttk.LabelFrame(outer, text='Connection settings (shared across stores)', padding=8); credentials.pack(fill='x', pady=(0,8))
+        pages = ttk.Notebook(outer); pages.pack(fill='both', expand=True)
+        setup_page = ttk.Frame(pages, padding=4)
+        status_page = ttk.Frame(pages, padding=4)
+        pages.add(setup_page, text='Job Setup')
+        pages.add(status_page, text='Full Status')
+        credentials = ttk.LabelFrame(setup_page, text='Connection settings (shared across stores)', padding=8); credentials.pack(fill='x', pady=(0,8))
         fields = [
             ('BO username', self.bo_user, False), ('BO password', self.bo_password, True), ('BO SSH port', self.bo_port, False),
             ('BO connect timeout', self.bo_connect_timeout, False), ('BO operation timeout', self.bo_operation_timeout, False),
@@ -58,13 +63,13 @@ class MultiStoreApp:
             ttk.Label(credentials,text=label).grid(row=r*2,column=c,sticky='w',padx=4,pady=(2,0))
             ttk.Entry(credentials,textvariable=var,show='*' if secret else '',width=20).grid(row=r*2+1,column=c,sticky='ew',padx=4,pady=(0,4))
             credentials.columnconfigure(c,weight=1)
-        source = ttk.LabelFrame(outer, text='Job input', padding=8); source.pack(fill='x', pady=(0,8))
+        source = ttk.LabelFrame(setup_page, text='Job input', padding=8); source.pack(fill='x', pady=(0,8))
         ttk.Label(source,text='Stores Excel (.xlsx)').grid(row=0,column=0,sticky='w',padx=4,pady=4)
         ttk.Entry(source,textvariable=self.selected_excel).grid(row=0,column=1,sticky='ew',padx=4,pady=4)
         ttk.Button(source,text='Browse Excel',command=self.browse_excel).grid(row=0,column=2,padx=4,pady=4)
         ttk.Label(source,text='Update type').grid(row=1,column=0,sticky='w',padx=4,pady=4)
-        mode=ttk.Combobox(source,textvariable=self.update_mode,values=('File','Folder Update'),state='readonly',width=18); mode.grid(row=1,column=1,sticky='w',padx=4,pady=4); mode.bind('<<ComboboxSelected>>',self._mode_change)
-        ttk.Label(source,text='Update file/folder').grid(row=2,column=0,sticky='w',padx=4,pady=4)
+        mode=ttk.Combobox(source,textvariable=self.update_mode,values=('File','ZIP File','Folder Update'),state='readonly',width=18); mode.grid(row=1,column=1,sticky='w',padx=4,pady=4); mode.bind('<<ComboboxSelected>>',self._mode_change)
+        ttk.Label(source,text='Update file/folder/ZIP').grid(row=2,column=0,sticky='w',padx=4,pady=4)
         ttk.Entry(source,textvariable=self.update_path).grid(row=2,column=1,sticky='ew',padx=4,pady=4)
         ttk.Button(source,text='Browse update',command=self.browse_update).grid(row=2,column=2,padx=4,pady=4)
         self.target_path_label = ttk.Label(source,text='Target file path on counters')
@@ -73,7 +78,7 @@ class MultiStoreApp:
         ttk.Label(source,text='Concurrent stores (1–100)').grid(row=4,column=0,sticky='w',padx=4,pady=4)
         ttk.Spinbox(source,from_=1,to=100,textvariable=self.worker_count,width=8).grid(row=4,column=1,sticky='w',padx=4,pady=4)
         source.columnconfigure(1,weight=1)
-        actions=ttk.Frame(outer); actions.pack(fill='x',pady=(0,8))
+        actions=ttk.Frame(setup_page); actions.pack(fill='x',pady=(0,8))
         ttk.Button(actions,text='Start / Load Excel',command=self.start_job).pack(side='left',padx=(0,5))
         ttk.Button(actions,text='Resume Saved Job',command=self.resume_saved_job).pack(side='left',padx=5)
         ttk.Button(actions,text='Retry Failed',command=self.retry_failed).pack(side='left',padx=5)
@@ -82,7 +87,7 @@ class MultiStoreApp:
         ttk.Button(actions,text='Refresh',command=self.refresh).pack(side='left',padx=5)
         ttk.Button(actions,text='Reset Current Job',command=self.reset).pack(side='left',padx=5)
         ttk.Label(actions,textvariable=self.status,font=('Segoe UI',10,'bold')).pack(side='right')
-        paned=ttk.Panedwindow(outer,orient='vertical'); paned.pack(fill='both',expand=True)
+        paned=ttk.Panedwindow(status_page,orient='vertical'); paned.pack(fill='both',expand=True)
         stores_frame=ttk.LabelFrame(paned,text='Stores / queues',padding=5); counters_frame=ttk.LabelFrame(paned,text='Selected store — counter-level status',padding=5)
         paned.add(stores_frame,weight=3); paned.add(counters_frame,weight=2)
         cols=('store','bo','count','status','error')
@@ -108,7 +113,7 @@ class MultiStoreApp:
         self.counter_tree.grid(row=0,column=0,sticky='nsew')
         csy.grid(row=0,column=1,sticky='ns')
         csx.grid(row=1,column=0,sticky='ew')
-        ttk.Label(outer,text='Excel columns: StoreCode | BO_IP | CounterCount | CounterIPs (optional). Custom IPs: comma/semicolon separated; missing IPs require confirmation.').pack(anchor='w',pady=(6,0))
+        ttk.Label(setup_page,text='Excel columns: StoreCode | BO_IP | CounterCount | CounterIPs (optional). Custom IPs: comma/semicolon separated; missing IPs require confirmation.').pack(anchor='w',pady=(6,0))
 
     def _mode_change(self,_event=None):
         label = 'Target parent folder on counters' if self.update_mode.get() == 'Folder Update' else 'Target file path on counters'
@@ -118,6 +123,7 @@ class MultiStoreApp:
         if p:self.selected_excel.set(p)
     def browse_update(self):
         if self.update_mode.get()=='Folder Update': p=filedialog.askdirectory(title='Select update folder')
+        elif self.update_mode.get()=='ZIP File': p=filedialog.askopenfilename(title='Select ZIP archive',filetypes=[('ZIP archive','*.zip')])
         else:p=filedialog.askopenfilename(title='Select replacement file')
         if p:self.update_path.set(p)
 
@@ -143,6 +149,7 @@ class MultiStoreApp:
         if self.update_mode.get()=='Folder Update':
             if not update.is_dir(): raise ValueError('Select a valid update folder.')
         elif not update.is_file(): raise ValueError('Select a valid update file.')
+        if self.update_mode.get()=='ZIP File' and update.suffix.lower() != '.zip': raise ValueError('Select a .zip archive.')
         if not self.target_path.get().strip().startswith('/'): raise ValueError('Target path must be an absolute Linux path.')
         return s,workers
 
@@ -185,7 +192,8 @@ class MultiStoreApp:
         self.config['bo'].update({'username':settings['bo_username'],'password':settings['bo_password'],'port':int(settings['bo_port']),'connect_timeout':float(settings['bo_connect_timeout']),'operation_timeout':float(settings['bo_operation_timeout'])})
         self.config['counter'].update({'username':settings['counter_username'],'password':settings['counter_password'],'port':int(settings['counter_port']),'connect_timeout':float(settings['counter_connect_timeout']),'operation_timeout':float(settings['counter_operation_timeout'])})
         self.config_manager.save(self.config)
-        self.db.replace_job(rows,self.target_path.get().strip(),self.update_path.get().strip(),'folder' if self.update_mode.get()=='Folder Update' else 'file')
+        transfer_mode = {'Folder Update':'folder','ZIP File':'zip','File':'file'}[self.update_mode.get()]
+        self.db.replace_job(rows,self.target_path.get().strip(),self.update_path.get().strip(),transfer_mode)
         self.scheduler=StoreScheduler(self.db,settings,self.logger,workers)
         self.scheduler.start(); self.status.set(f'Running — {len(rows)} stores / {workers} workers'); self.refresh()
 

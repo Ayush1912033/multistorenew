@@ -129,12 +129,14 @@ class BOController:
         local_path = Path(local_file)
         transfer_mode = str(transfer_mode or "file").strip().lower()
 
-        if transfer_mode not in ("file", "folder"):
-            raise ValueError("Transfer mode must be 'file' or 'folder'.")
+        if transfer_mode not in ("file", "folder", "zip"):
+            raise ValueError("Transfer mode must be 'file', 'folder', or 'zip'.")
 
-        if transfer_mode == "file":
+        if transfer_mode in ("file", "zip"):
             if not local_path.is_file():
                 raise ValueError("Replacement file does not exist.")
+            if transfer_mode == "zip" and local_path.suffix.lower() != ".zip":
+                raise ValueError("ZIP update must be a .zip archive.")
         else:
             if not local_path.is_dir():
                 raise ValueError("Update folder does not exist.")
@@ -157,11 +159,12 @@ class BOController:
         remote_update = f"{remote_root}/update"
         remote_manifest = f"{remote_root}/manifest.txt"
         remote_counter_script = f"{remote_root}/counter_folder_apply.sh"
+        remote_package = f"{remote_root}/counter_update.tar.gz"
         remote_script = f"{remote_root}/distribute.sh"
         remote_password = f"{remote_root}/.counter_password"
         remote_config = f"{remote_root}/counters.json"
 
-        local_hash = self._sha256(local_path) if transfer_mode == "file" else ""
+        local_hash = self._sha256(local_path) if transfer_mode in ("file", "zip") else ""
         manifest_count = 0
         client = None
         sftp = None
@@ -180,7 +183,7 @@ class BOController:
                     f"{error.strip() or output.strip()}"
                 )
 
-            if transfer_mode == "file":
+            if transfer_mode in ("file", "zip"):
                 sftp.put(str(local_path), remote_file)
                 sftp.chmod(remote_file, 0o600)
             else:
@@ -215,12 +218,27 @@ class BOController:
                 with sftp.open(remote_counter_script, "w") as f:
                     f.write(counter_script)
                 sftp.chmod(remote_counter_script, 0o700)
+                package_cmd = (
+                    f"tar -czf {shlex.quote(remote_package)} "
+                    f"-C {shlex.quote(remote_root)} update manifest.txt counter_folder_apply.sh"
+                )
+                _output, package_error, package_exit = self._exec(
+                    client,
+                    package_cmd,
+                    timeout=self.operation_timeout * max(1, len(counters)),
+                )
+                if package_exit != 0:
+                    raise RuntimeError(
+                        "Could not package folder update on BO: "
+                        f"{package_error.strip() or 'tar failed'}"
+                    )
 
             script = self._build_script(
                 remote_file=remote_file,
                 remote_update=remote_update,
                 remote_manifest=remote_manifest,
                 remote_counter_script=remote_counter_script,
+                remote_package=remote_package,
                 target_path=target_path,
                 remote_password=remote_password,
                 remote_config=remote_config,
@@ -701,6 +719,28 @@ distribute_one() {{
         return 0
     fi
 
+    # Grant the replacement file the same writable permissions as folder updates.
+    PERMISSION_OUTPUT=$(
+        timeout "$OP_TIMEOUT" sshpass -f "$PASSWORD_FILE" ssh \\
+            -o StrictHostKeyChecking=no \\
+            -o UserKnownHostsFile=/dev/null \\
+            -o ConnectTimeout="$CONNECT_TIMEOUT" \\
+            -o ConnectionAttempts=1 \\
+            -o LogLevel=ERROR \\
+            -p "$PORT" \\
+            "$COUNTER_USER@$IP" \\
+            "sudo -S -p '' -k chmod 777 $(printf '%q' "$TARGET")" \\
+            < "$PASSWORD_FILE" 2>&1
+    )
+    PERMISSION_EXIT=$?
+    if [ "$PERMISSION_EXIT" -ne 0 ]; then
+        PERMISSION_OUTPUT=$(printf '%s' "$PERMISSION_OUTPUT" | tr '\\n' ' ' | cut -c1-400)
+        [ -z "$PERMISSION_OUTPUT" ] && PERMISSION_OUTPUT="sudo chmod failed (exit code $PERMISSION_EXIT)"
+        emit "$NUMBER" "$IP" "Failed" \\
+            "File replacement succeeded, but permission update failed: $PERMISSION_OUTPUT" "$BACKUP"
+        return 0
+    fi
+
     # ------------------------------------------------------------
     # 8. Final SHA-256 verification
     # ------------------------------------------------------------
@@ -766,6 +806,7 @@ exit 0
         remote_update,
         remote_manifest,
         remote_counter_script,
+        remote_package,
         target_path,
         remote_password,
         remote_config,
@@ -784,6 +825,7 @@ exit 0
                 remote_update=remote_update,
                 remote_manifest=remote_manifest,
                 remote_counter_script=remote_counter_script,
+                remote_package=remote_package,
                 target_path=target_path,
                 remote_password=remote_password,
                 remote_config=remote_config,
@@ -1018,6 +1060,7 @@ printf 'UPDATED\\t%s\\n' \"$EXPECTED_FILE_COUNT\"
         remote_update,
         remote_manifest,
         remote_counter_script,
+        remote_package,
         target_path,
         remote_password,
         remote_config,
@@ -1038,6 +1081,7 @@ set -u
 REMOTE_UPDATE={shlex.quote(remote_update)}
 REMOTE_MANIFEST={shlex.quote(remote_manifest)}
 REMOTE_COUNTER_SCRIPT={shlex.quote(remote_counter_script)}
+REMOTE_PACKAGE={shlex.quote(remote_package)}
 TARGET={shlex.quote(target_path)}
 PASSWORD_FILE={shlex.quote(remote_password)}
 COUNTERS_FILE={shlex.quote(remote_config)}
@@ -1052,7 +1096,7 @@ emit() {{
     printf 'RESULT\\t%s\\t%s\\t%s\\t%s\\t%s\\n' \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"
 }}
 
-for REQUIRED in sshpass scp ssh timeout sha256sum; do
+for REQUIRED in sshpass scp ssh timeout sha256sum tar; do
     if ! command -v \"$REQUIRED\" >/dev/null 2>&1; then
         emit \"BO\" \"0.0.0.0\" \"Failed\" \"$REQUIRED is not installed on BO\" \"\"
         exit 2
@@ -1132,42 +1176,40 @@ distribute_one() {{
     fi
 
     SCP_OUTPUT=$(
-        timeout \"$OP_TIMEOUT\" sshpass -f \"$PASSWORD_FILE\" scp -q -r \\
+        timeout "$OP_TIMEOUT" sshpass -f "$PASSWORD_FILE" scp -q \\
             -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
-            -o ConnectTimeout=\"$CONNECT_TIMEOUT\" -o ConnectionAttempts=1 \\
-            -o LogLevel=ERROR -P \"$PORT\" \"$REMOTE_UPDATE\" \\
-            \"$COUNTER_USER@$IP:$COUNTER_ROOT/\" 2>&1
+            -o ConnectTimeout="$CONNECT_TIMEOUT" -o ConnectionAttempts=1 \\
+            -o LogLevel=ERROR -P "$PORT" "$REMOTE_PACKAGE" \\
+            "$COUNTER_USER@$IP:$COUNTER_ROOT/update_package.tar.gz" 2>&1
     )
     SCP_EXIT=$?
-    if [ \"$SCP_EXIT\" -ne 0 ]; then
-        SCP_OUTPUT=$(printf '%s' \"$SCP_OUTPUT\" | tr '\\\n' ' ' | cut -c1-400)
-        [ -z \"$SCP_OUTPUT\" ] && SCP_OUTPUT=\"SCP folder upload failed (exit code $SCP_EXIT)\"
-        timeout \"$OP_TIMEOUT\" sshpass -f \"$PASSWORD_FILE\" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=\"$CONNECT_TIMEOUT\" -o LogLevel=ERROR -p \"$PORT\" \"$COUNTER_USER@$IP\" \"rm -rf $(printf '%q' \"$COUNTER_ROOT\")\" >/dev/null 2>&1 || true
-        emit \"$NUMBER\" \"$IP\" \"Failed\" \"SCP folder upload failed: $SCP_OUTPUT\" \"\"
+    if [ "$SCP_EXIT" -ne 0 ]; then
+        SCP_OUTPUT=$(printf '%s' "$SCP_OUTPUT" | tr '\\n' ' ' | cut -c1-400)
+        [ -z "$SCP_OUTPUT" ] && SCP_OUTPUT="SCP folder package upload failed (exit code $SCP_EXIT)"
+        timeout "$OP_TIMEOUT" sshpass -f "$PASSWORD_FILE" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$CONNECT_TIMEOUT" -o LogLevel=ERROR -p "$PORT" "$COUNTER_USER@$IP" "rm -rf $(printf '%q' "$COUNTER_ROOT")" >/dev/null 2>&1 || true
+        emit "$NUMBER" "$IP" "Failed" "SCP folder package upload failed: $SCP_OUTPUT" ""
         return 0
     fi
 
-    for SOURCE in \"$REMOTE_MANIFEST\" \"$REMOTE_COUNTER_SCRIPT\"; do
-        SCP_OUTPUT=$(
-            timeout \"$OP_TIMEOUT\" sshpass -f \"$PASSWORD_FILE\" scp -q \\
-                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
-                -o ConnectTimeout=\"$CONNECT_TIMEOUT\" -o ConnectionAttempts=1 \\
-                -o LogLevel=ERROR -P \"$PORT\" \"$SOURCE\" \\
-                \"$COUNTER_USER@$IP:$COUNTER_ROOT/\" 2>&1
-        )
-        SCP_EXIT=$?
-        if [ \"$SCP_EXIT\" -ne 0 ]; then
-            SCP_OUTPUT=$(printf '%s' \"$SCP_OUTPUT\" | tr '\\\n' ' ' | cut -c1-400)
-            [ -z \"$SCP_OUTPUT\" ] && SCP_OUTPUT=\"SCP helper/manifest upload failed (exit code $SCP_EXIT)\"
-            timeout \"$OP_TIMEOUT\" sshpass -f \"$PASSWORD_FILE\" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=\"$CONNECT_TIMEOUT\" -o LogLevel=ERROR -p \"$PORT\" \"$COUNTER_USER@$IP\" \"rm -rf $(printf '%q' \"$COUNTER_ROOT\")\" >/dev/null 2>&1 || true
-            emit \"$NUMBER\" \"$IP\" \"Failed\" \"SCP helper/manifest upload failed: $SCP_OUTPUT\" \"\"
-            return 0
-        fi
-    done
+    EXTRACT_OUTPUT=$(
+        timeout "$OP_TIMEOUT" sshpass -f "$PASSWORD_FILE" ssh \\
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \\
+            -o ConnectTimeout="$CONNECT_TIMEOUT" -o ConnectionAttempts=1 \\
+            -o LogLevel=ERROR -p "$PORT" "$COUNTER_USER@$IP" \\
+            "tar -xzf $(printf '%q' "$COUNTER_ROOT/update_package.tar.gz") -C $(printf '%q' "$COUNTER_ROOT") && rm -f $(printf '%q' "$COUNTER_ROOT/update_package.tar.gz")" 2>&1
+    )
+    EXTRACT_EXIT=$?
+    if [ "$EXTRACT_EXIT" -ne 0 ]; then
+        EXTRACT_OUTPUT=$(printf '%s' "$EXTRACT_OUTPUT" | tr '\\n' ' ' | cut -c1-400)
+        [ -z "$EXTRACT_OUTPUT" ] && EXTRACT_OUTPUT="Could not extract folder update package (exit code $EXTRACT_EXIT)"
+        timeout "$OP_TIMEOUT" sshpass -f "$PASSWORD_FILE" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$CONNECT_TIMEOUT" -o LogLevel=ERROR -p "$PORT" "$COUNTER_USER@$IP" "rm -rf $(printf '%q' "$COUNTER_ROOT")" >/dev/null 2>&1 || true
+        emit "$NUMBER" "$IP" "Failed" "Folder package extraction failed: $EXTRACT_OUTPUT" ""
+        return 0
+    fi
 
-    # The helper script is copied to the counter staging directory. The
-    # manifest and update tree are also copied there, then the helper performs
-    # all verification, backups, recursive directory creation, replacement,
+    # The helper script, manifest, and update tree are unpacked from one
+    # compressed package. The helper performs verification, backups, recursive
+    # directory creation, replacement,
     # and rollback logic locally on the counter.
     APPLY_OUTPUT=$(
         timeout \"$OP_TIMEOUT\" sshpass -f \"$PASSWORD_FILE\" ssh \\

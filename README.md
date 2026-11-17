@@ -66,3 +66,5 @@ The database and logs are created beside `main.py`. Keep the project folder in a
 Open the app, verify the saved SSH credentials are present, set the worker limit, and click **Resume Saved Job** to start stores that are still `Pending`. Stores marked `Failed` are not attempted again. Click **Start / Load Excel** to create a new job.
 
 A sample workbook is included at `templates/stores_template.xlsx`.
+
+# multistorenew
